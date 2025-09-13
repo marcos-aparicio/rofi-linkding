@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+
+_linkding () {
+    linkding "$@"
+}
+
+
+_rofi () {
+    rofi -dmenu -i -no-sort -theme-str 'mainbox { padding: 25% 5%;}' "$@"
+}
+
+# display settings
+display_type=1
+max_str_width=80
+
+# Keyboard shortcuts
+: ${KB_SWITCH_VIEW="Alt+Tab"}
+: ${KB_NEW_BOOKMARK="Alt+n"}
+: ${KB_ACTIONS="Alt+a"}
+: ${KB_EDIT="Alt+e"}
+: ${KB_DELETE="Alt+d"}
+
+# colors
+help_color="#FF00AA"
+
+on_bookmarks_enter(){
+  # select whether to open the bookmark or just type it
+  xdotool type --clearmodifiers -- "$(get_url_from_id $1)"
+}
+
+main () {
+
+    HELP="Welcome to LinkDing | Use <span color='${help_color}'>${KB_NEW_BOOKMARK}</span> to add a new Bookmark | Use <span color='${help_color}'>${KB_SWITCH_VIEW}</span> to switch View. | Use <span color='${help_color}'>${KB_ACTIONS}</span> for actions"
+
+    if [[ $mode == "bookmarks" ]]; then
+        content=$(parse_linkding)
+        menu=$(echo "${content}" | _rofi -p 'Bookmark' -filter "${filter}" -mesg "${HELP}" -kb-custom-1 "${KB_NEW_BOOKMARK}" -kb-custom-2 "${KB_SWITCH_VIEW}" -kb-custom-3 "${KB_ACTIONS}" -kb-custom-4 "${KB_EDIT}" -kb-custom-5 "${KB_DELETE}")
+    elif [[ $mode == "tags" ]]; then
+        menu=$(_linkding tags all | jq -r '.results[].name' | cut -d ' ' -f2-  | _rofi -p '> ' -mesg "${HELP}" -kb-custom-1 "${KB_NEW_BOOKMARK}" -kb-custom-2 "${KB_SWITCH_VIEW}" -kb-custom-3 "${KB_ACTIONS}" -kb-custom-4 "${KB_EDIT}" -kb-custom-5 "${KB_DELETE}")
+    fi
+
+    val=$?
+    case $val in
+        1) exit ;;
+        12) options_menu ;;
+        10) add_mark ;;
+        14) delete_menu ;;
+        13) edit_menu ;;
+        11)
+            if [[ $mode =~ (bookmarks|tags) ]]; then
+                export mode=$( [[ $mode == "bookmarks" ]] && echo "tags" || echo "bookmarks" )
+                mode=$mode main
+            fi
+            ;;
+        0)
+            if [[ $mode == "bookmarks" ]]; then
+                id=$(get_id "$content" "$menu")
+                for bm in ${id}; do
+                  on_bookmarks_enter $bm
+                done
+            elif [[ $mode == "tags" ]]; then
+                filter="${menu}" mode="bookmarks" main
+            fi
+            ;;
+    esac
+}
+
+options_menu () {
+  case $mode in
+    bookmarks)
+        askmenu=$(echo -e "< Return\n---\n1. Edit\n2. Delete" | _rofi -p '> ' -mesg "Choose Action for bookmark")
+        val=$?
+        [[ $val -eq 1 ]] && exit
+        [[ $val -ne 0 ]] && exit
+
+        [[ "$askmenu" == "< Return" ]] && { export mode=bookmarks;main; }
+        [[ "$askmenu" == "1. Edit" ]] && { edit_menu; }
+        [[ "$askmenu" == "2. Delete" ]] && { delete_menu; }
+    ;;
+    tags)
+        askmenu=$(echo -e "< Return\n---\n1. Replace Tag\n2. Delete Tag" | _rofi -p '> ' -mesg "Choose Action for tag \"${menu}\"")
+        val=$?
+
+        [[ $val -eq 1 ]] && exit
+        [[ $val -ne 0 ]] && exit
+
+        [[ $askmenu == "< Return" ]] && export mode=tags;main
+
+        case $askmenu in
+        "1. Replace Tag")
+            newtag=$(echo | _rofi -p '> ' -mesg "Enter new tag name for tag \"${menu}\"")
+            val=$?
+            [[ $val -eq 1 ]] && exit
+            [[ $val -ne 0 ]] && exit
+
+            [[ $newtag == "" ]] &&\
+               mode=tags main ||\
+               _linkding -r "${menu}" "${newtag}";mode=tags main
+            ;;
+          "2. Delete Tag")
+            delask=$(echo -e "1. Yes\n2. No" | _rofi -p '> ' -mesg "Really delete tag?")
+            val=$?
+            [[ $val -eq 1 ]] && exit
+            [[ $val -ne 0 ]] && exit
+
+            [[ $delask == "1. Yes" ]] &&\
+               _linkding -r "${menu}";mode=tags main ||\
+               mode=tags main
+            ;;
+        esac
+    ;;
+  esac
+}
+
+delete_menu () {
+    id=$(get_id "$content" "$menu")
+    delask=$(echo -e "1. Yes\n2. No" | _rofi -p '> ' -mesg "Really delete bookmark?")
+    val=$?
+    if [[ $val -eq 1 ]]; then
+        exit
+    elif [[ $val -eq 0 ]]; then
+        if [[ $delask == "1. Yes" ]]; then
+            _linkding bookmarks delete ${id}
+            mode=bookmarks main
+        elif [[ $delask == "2. No" ]]; then
+            options_menu
+        fi
+    fi
+}
+
+edit_menu () {
+    id=$(get_id "$content" "$menu")
+    title="$(get_title_from_id $id)"
+    bookmark="$(get_url_from_id $id)"
+    tags="$(get_tags_from_id $id)"
+    content=$(echo -e "1. title: $title\n2. url: $bookmark\n3. tags: $tags")
+    editmenu=$(echo -e "< Return\n---\n${content}" | _rofi -p '> ')
+    val=$?
+    [[ $val -eq 1 ]] && exit
+    [[ $val -ne 0 ]] && exit
+
+    case $editmenu in
+      "< Return")
+        main
+        ;;
+      "tags: NOTAG")
+        add_tags --update
+        ;;
+      3\.\ tags:*)
+        tags="${tags}" edit_tags
+        ;;
+      2\.\ url:*)
+        edit_bookmark
+        ;;
+      1\.\ title:*)
+        edit_title
+        ;;
+      *)
+        ;;
+    esac
+}
+
+edit_tags () {
+    edittagsmenu=$(echo | _rofi -filter "${tags}" -p '> ' -mesg "Edit Tags and hit Enter")
+    val=$?
+    if [[ $val -eq 1 ]]; then
+        exit
+    elif [[ $val -eq 0 ]]; then
+        _linkding bookmarks update ${id} --tags "${edittagsmenu}"}
+    fi
+    mode=bookmarks main
+}
+
+edit_bookmark () {
+    bmarkmenu=$(echo "" | _rofi -p "> " -filter "${bookmark}" -mesg "Edit Bookmark and hit Enter")
+    val=$?
+    if [[ $val -eq 1 ]]; then
+        exit
+    elif [[ $val -eq 0 ]]; then
+        if [[ $bmarkmenu == "http"* ]]; then
+            _linkding bookmarks update "${id}" --url "${bmarkmenu}"
+        else
+            echo "" | rofi -e "Not a valid URI, Make sure URLs start with http"
+            edit_bookmark
+        fi
+    fi
+    mode=bookmarks main
+}
+
+edit_title () {
+  titlemenu=$(echo "" | _rofi -p "> " -filter "${title}" -mesg "Edit Title and hit Enter")
+  val=$?
+  if [[ $val -eq 1 ]]; then
+    exit
+  elif [[ $val -eq 0 ]]; then
+    _linkding bookmarks update "${id}" --title "${titlemenu}"
+  fi
+  mode=bookmarks main
+}
+
+add_mark () {
+    inserturl=$(echo -e "$(xclip -o)" | _rofi -p '> ' -mesg "Use URL below or type manually")
+    val=$?
+    if [[ $val -eq 1 ]]; then
+        exit
+    elif [[ $val -eq 0 ]]; then
+        add_tags
+    fi
+}
+
+add_tags () {
+    inserttags=$(_linkding tags all | jq -r '.[].name' | _rofi -p '> ' -mesg "Add some tags. Separate tags with ', '")
+    val=$?
+    if [[ $val -eq 1 ]]; then
+        exit
+    elif [[ $val -eq 0 ]]; then
+        if [[ $(echo "${inserttags}" | wc -l) -gt 1 ]]; then
+            taglist=$(echo "${inserttags}" | tr '\n' ',')
+            tags=()
+            for tag in $taglist; do
+                tags+=("$tag")
+            done
+        else
+            tags=${inserttags}
+        fi
+        if [[ $1 == "--update" ]]; then
+            _linkding bookmarks update "${id}" --tags "${tags}"
+        else
+            _linkding bookmarks create "${inserturl}" --tags "${tags}"
+        fi
+    fi
+}
+
+parse_linkding () {
+  # returns all bookmarks in this format:
+  _linkding bookmarks all |\
+  jq -r '.results[] | "\(.id)\t\(if .url | length <= 80 then .url else .url[:80] + "..." end )\t\(.title)\t\(if (.tag_names | length) > 0 then (.tag_names | join(",")) else "NOTAGS" end)"' |\
+  column -s $'\t' -t |\
+  sed 's/\t/    /g'
+}
+
+get_id () {
+  id=$(echo "${2%% *}")
+  if [ -z "$id" ]; then
+    prev=""
+    IFS=$'\n'
+    for line in $1; do
+      if [ "$2" = "$line" ]; then
+        id=$(echo "${prev%% *}")
+        break
+      else
+        prev="$line"
+      fi
+    done
+  fi
+  echo $id
+}
+
+get_title_from_id () {
+  echo "$(_linkding bookmarks get $1 | jq -r '.title')"
+}
+
+get_url_from_id () {
+  echo "$(_linkding bookmarks get $1 | jq -r '.url')"
+}
+
+get_tags_from_id () {
+  echo "$(_linkding bookmarks get $1 | jq '.tag_names | join(\",\")')"
+}
+
+mode=bookmarks main
