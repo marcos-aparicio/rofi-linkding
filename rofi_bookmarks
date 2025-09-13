@@ -233,7 +233,7 @@ add_tags () {
 
 parse_linkding () {
   # returns all bookmarks in this format:
-  _linkding bookmarks all |\
+  _linkding bookmarks all -l 300 |\
   jq -r '.results[] | "\(.id)\t\(if .url | length <= 80 then .url else .url[:80] + "..." end )\t\(.title)\t\(if (.tag_names | length) > 0 then (.tag_names | join(",")) else "NOTAGS" end)"' |\
   column -s $'\t' -t |\
   sed 's/\t/    /g'
